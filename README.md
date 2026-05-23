@@ -1,7 +1,5 @@
 # study-tracker
 
-# study-tracker
-
 A minimal, single-file study timer that runs entirely in the browser — no install, no backend, no dependencies.
 
 ## Features
