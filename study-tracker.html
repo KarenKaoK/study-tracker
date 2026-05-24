@@ -99,6 +99,8 @@ body{font-family:var(--mono);font-size:13px;color:var(--text);display:flex;justi
 .cat-row:hover .cat-actions{display:flex}
 .del-btn{background:none;border:none;cursor:pointer;color:var(--text3);font-size:11px;padding:1px 4px;border-radius:2px;font-family:var(--mono);line-height:1}
 .del-btn:hover{color:var(--red)}
+.arc-btn{background:none;border:none;cursor:pointer;color:var(--text3);font-size:11px;padding:1px 4px;border-radius:2px;font-family:var(--mono);line-height:1}
+.arc-btn:hover{color:var(--amber)}
 
 .tasks-list{margin-left:16px;border-left:1px solid var(--border);padding-left:8px;margin-bottom:2px}
 .task-row{display:flex;align-items:center;gap:5px;padding:4px 6px;border-radius:3px;cursor:pointer;user-select:none;border:1px solid transparent}
@@ -401,6 +403,7 @@ function renderSidebarInner(){
     if(isOpen){
       html+='<div class="tasks-list">';
       for(const task of (cat.tasks||[])){
+        if(task.archived)continue;
         const tMs=getTaskMs(task.id);
         const isSel=S.selectedTaskId===task.id;
         const isRun=S.timer.taskId===task.id&&(S.timer.running||S.timer.paused);
@@ -409,7 +412,10 @@ function renderSidebarInner(){
         html+='<span class="task-name-txt">'+esc(task.name)+'</span>';
         if(isRun)html+='<span class="running-dot">●</span>';
         if(tMs>0)html+='<span class="task-time-txt">'+fmtMs(tMs)+'</span>';
-        html+='<span class="task-actions"><button class="del-btn" onclick="event.stopPropagation();deleteTask(\''+cat.id+'\',\''+task.id+'\')">✕</button></span>';
+        html+='<span class="task-actions">';
+        html+='<button class="arc-btn" title="archive" onclick="event.stopPropagation();archiveTask(\''+cat.id+'\',\''+task.id+'\')">▽</button>';
+        html+='<button class="del-btn" onclick="event.stopPropagation();deleteTask(\''+cat.id+'\',\''+task.id+'\')">✕</button>';
+        html+='</span>';
         html+='</div>';
       }
       if(addTaskCatId===cat.id){
@@ -530,6 +536,18 @@ window.deleteTask=function(catId,taskId){
   const cat=S.categories.find(c=>c.id===catId);
   if(cat)cat.tasks=(cat.tasks||[]).filter(t=>t.id!==taskId);
   if(S.selectedTaskId===taskId)S.selectedTaskId=null;
+  save();render();
+};
+window.archiveTask=function(catId,taskId){
+  const cat=S.categories.find(c=>c.id===catId);
+  if(!cat)return;
+  const task=(cat.tasks||[]).find(t=>t.id===taskId);
+  if(!task)return;
+  task.archived=true;
+  if(S.selectedTaskId===taskId){
+    S.selectedTaskId=null;
+    if(S.timer.running||S.timer.paused)endTimer();
+  }
   save();render();
 };
 window.deleteSession=function(id){
