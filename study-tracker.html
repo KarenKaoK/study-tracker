@@ -222,6 +222,19 @@ body{font-family:var(--mono);font-size:13px;color:var(--text);display:flex;justi
 .session-dur{font-size:10px;color:var(--text3);min-width:50px;text-align:right}
 .session-del{padding:1px 5px;font-size:10px;border:none;border-radius:2px;background:none;color:var(--text3);cursor:pointer;font-family:var(--mono)}
 .session-del:hover{color:var(--red)}
+
+/* heatmap */
+.heatmap-wrap{margin-bottom:20px}
+.heatmap-table{border-collapse:separate;border-spacing:3px;width:100%}
+.heatmap-table th{font-size:10px;color:var(--text3);letter-spacing:0.5px;padding:3px 4px;text-align:center;font-family:var(--mono);font-weight:500}
+.heatmap-table th.hm-row-label{text-align:right;padding-right:8px;color:var(--amber);font-size:10px;min-width:62px;white-space:nowrap}
+.hm-cell{height:30px;border-radius:3px;text-align:center;vertical-align:middle;font-size:10px;font-family:var(--mono);font-weight:500;cursor:default}
+.hm-cell.hm-empty{background:#1a2a1a;color:#2a4a2a}
+.hm-legend{display:flex;align-items:center;gap:4px;margin-top:10px}
+.hm-legend-box{width:22px;height:10px;border-radius:2px}
+.hm-legend-lbl{font-size:10px;color:var(--text3);font-family:var(--mono)}
+.hm-section-hd{font-size:10px;letter-spacing:1.5px;color:var(--green);text-transform:uppercase;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--border);font-family:var(--mono)}
+.hm-empty-hint{color:var(--text3);font-size:11px;padding:8px 0}
 </style>
 </head>
 <body>
@@ -256,6 +269,7 @@ body{font-family:var(--mono);font-size:13px;color:var(--text);display:flex;justi
   <div class="tabs">
     <div class="tab active" data-tab="timer">timer</div>
     <div class="tab" data-tab="stats">stats</div>
+    <div class="tab" data-tab="heatmap">heatmap</div>
   </div>
 
   <!-- content -->
@@ -275,6 +289,10 @@ body{font-family:var(--mono);font-size:13px;color:var(--text);display:flex;justi
     <!-- stats tab -->
     <div id="tab-stats" style="display:none">
       <div id="stats-content"></div>
+    </div>
+    <!-- heatmap tab -->
+    <div id="tab-heatmap" style="display:none">
+      <div id="heatmap-content"></div>
     </div>
   </div>
 
@@ -570,9 +588,111 @@ document.querySelectorAll('.tab').forEach(tab=>{
     const name=this.dataset.tab;
     document.getElementById('tab-timer').style.display=name==='timer'?'block':'none';
     document.getElementById('tab-stats').style.display=name==='stats'?'block':'none';
+    document.getElementById('tab-heatmap').style.display=name==='heatmap'?'block':'none';
     if(name==='stats')renderStats();
+    if(name==='heatmap')renderHeatmap();
   };
 });
+
+// heatmap
+function renderHeatmap(){
+  const el=document.getElementById('heatmap-content');if(!el)return;
+  if(!S.sessions.length){el.innerHTML='<div class="hm-empty-hint">-- no records yet --</div>';return;}
+
+  // 收集所有日期與類別
+  const dateSet=new Set(),catMap={};
+  for(const s of S.sessions){
+    dateSet.add(s.date);
+    for(const c of S.categories){
+      if((c.tasks||[]).some(t=>t.id===s.taskId))catMap[s.taskId]=c.name;
+    }
+  }
+  const dates=[...dateSet].sort();
+  const catNames=[...new Set(S.categories.map(c=>c.name))];
+
+  // 建立 lookup: catName|date => ms
+  const lookup={};
+  for(const s of S.sessions){
+    const cn=catMap[s.taskId];if(!cn)continue;
+    const key=cn+'|'+s.date;
+    lookup[key]=(lookup[key]||0)+s.durationMs;
+  }
+  const allVals=Object.values(lookup);
+  if(!allVals.length){el.innerHTML='<div class="hm-empty-hint">-- no records yet --</div>';return;}
+  const maxVal=Math.max(...allVals);
+
+  // 綠色終端漸層
+  const GREEN_STOPS=['#0d2e1a','#1a5c31','#27913f','#2db84f','#39ff8a'];
+  const GREEN_FGS  =['#39ff8a','#39ff8a','#0d2e1a','#0d2e1a','#0d2e1a'];
+
+  function lerpHex(a,b,t){
+    const p=s=>[parseInt(s.slice(1,3),16),parseInt(s.slice(3,5),16),parseInt(s.slice(5,7),16)];
+    const [ar,ag,ab]=p(a),[br,bg2,bb2]=p(b);
+    return '#'+[Math.round(ar+(br-ar)*t),Math.round(ag+(bg2-ag)*t),Math.round(ab+(bb2-ab)*t)].map(x=>x.toString(16).padStart(2,'0')).join('');
+  }
+  function getColor(val){
+    const t=Math.min(val/maxVal,1);
+    const n=GREEN_STOPS.length-1;
+    const idx=Math.min(Math.floor(t*n),n-1);
+    const lt=(t-idx/n)*n;
+    return{bg:lerpHex(GREEN_STOPS[idx],GREEN_STOPS[idx+1],lt),fg:GREEN_FGS[Math.round(t*(GREEN_FGS.length-1))]};
+  }
+
+  // 格式化日期 label
+  function fmtDate(d){const dt=new Date(d+'T12:00:00');return (dt.getMonth()+1)+'/'+(dt.getDate());}
+
+  let html='<div class="hm-section-hd">heatmap · minutes</div>';
+  html+='<div class="heatmap-wrap"><table class="heatmap-table">';
+
+  // header row: 日期
+  html+='<tr><th class="hm-row-label"></th>';
+  for(const d of dates)html+='<th>'+fmtDate(d)+'</th>';
+  html+='<th style="color:var(--text3);font-size:10px">sum</th></tr>';
+
+  // data rows: 類別
+  for(const cat of catNames){
+    html+='<tr><th class="hm-row-label">'+esc(cat)+'</th>';
+    let rowTotal=0;
+    for(const d of dates){
+      const val=lookup[cat+'|'+d]||0;
+      if(val){
+        const mins=Math.round(val/60000);
+        rowTotal+=mins;
+        const{bg,fg}=getColor(val);
+        html+='<td class="hm-cell" style="background:'+bg+';color:'+fg+'" title="'+esc(cat)+' · '+fmtDate(d)+' · '+mins+'m">'+mins+'m</td>';
+      } else {
+        html+='<td class="hm-cell hm-empty">–</td>';
+      }
+    }
+    html+='<td class="hm-cell" style="background:none;color:var(--text3);font-size:10px">'+(rowTotal?rowTotal+'m':'')+'</td>';
+    html+='</tr>';
+  }
+
+  // sum row
+  html+='<tr><th class="hm-row-label" style="color:var(--text3)">sum</th>';
+  let grandTotal=0;
+  for(const d of dates){
+    let dayTotal=0;
+    for(const cat of catNames)dayTotal+=Math.round((lookup[cat+'|'+d]||0)/60000);
+    grandTotal+=dayTotal;
+    html+='<td class="hm-cell" style="background:none;color:var(--text3);font-size:10px">'+(dayTotal?dayTotal+'m':'')+'</td>';
+  }
+  html+='<td class="hm-cell" style="background:none;color:var(--green);font-size:10px;font-weight:500">'+grandTotal+'m</td>';
+  html+='</tr>';
+
+  html+='</table>';
+
+  // legend
+  html+='<div class="hm-legend"><span class="hm-legend-lbl">少</span>';
+  [0.1,0.3,0.5,0.75,1].forEach(t=>{
+    const{bg}=getColor(t*maxVal);
+    html+='<div class="hm-legend-box" style="background:'+bg+'"></div>';
+  });
+  html+='<span class="hm-legend-lbl">多</span></div>';
+  html+='</div>';
+
+  el.innerHTML=html;
+}
 
 // export
 function buildRows(){
