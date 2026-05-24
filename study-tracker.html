@@ -213,6 +213,23 @@ body{font-family:var(--mono);font-size:13px;color:var(--text);display:flex;justi
 .stats-day-total{font-size:12px;color:var(--text)}
 .stats-day-del{padding:1px 6px;font-size:10px;border:1px solid transparent;border-radius:2px;background:none;color:var(--text3);cursor:pointer;font-family:var(--mono);margin-left:6px}
 .stats-day-del:hover{color:var(--red);border-color:var(--red-dim)}
+.sessions-toggle{display:flex;align-items:center;gap:5px;cursor:pointer;padding:3px 0;margin-top:6px;color:var(--text3);font-size:10px;letter-spacing:0.5px;user-select:none;width:fit-content}
+.sessions-toggle:hover{color:var(--text2)}
+.sessions-toggle-arrow{font-size:8px;transition:transform 0.15s;display:inline-block}
+.sessions-toggle-arrow.open{transform:rotate(90deg)}
+.sessions-list{margin-top:4px}
+
+/* history filter */
+.history-filter{display:flex;align-items:center;gap:6px;margin-bottom:10px;flex-wrap:wrap}
+.filter-btn{padding:2px 10px;font-size:10px;border:1px solid var(--border2);border-radius:2px;background:none;color:var(--text3);cursor:pointer;font-family:var(--mono);letter-spacing:0.5px}
+.filter-btn:hover{color:var(--text);border-color:var(--text3)}
+.filter-btn.active{border-color:var(--green-dim);color:var(--green);background:var(--green-bg)}
+.filter-date-inputs{display:flex;align-items:center;gap:4px}
+.filter-date-input{background:var(--bg3);border:1px solid var(--border2);border-radius:2px;color:var(--text2);font-family:var(--mono);font-size:10px;padding:2px 6px;outline:none;width:96px}
+.filter-date-input:focus{border-color:var(--green-dim)}
+.filter-sep{font-size:10px;color:var(--text3)}
+.show-more-btn{width:100%;padding:5px 0;font-size:10px;letter-spacing:0.5px;border:1px dashed var(--border2);border-radius:3px;background:none;color:var(--text3);cursor:pointer;font-family:var(--mono);margin-top:4px}
+.show-more-btn:hover{color:var(--green);border-color:var(--green-dim)}
 
 .session-row{
   display:flex;align-items:center;gap:6px;
@@ -224,6 +241,11 @@ body{font-family:var(--mono);font-size:13px;color:var(--text);display:flex;justi
 .session-dur{font-size:10px;color:var(--text3);min-width:50px;text-align:right}
 .session-del{padding:1px 5px;font-size:10px;border:none;border-radius:2px;background:none;color:var(--text3);cursor:pointer;font-family:var(--mono)}
 .session-del:hover{color:var(--red)}
+.session-dur{cursor:pointer;border-radius:2px;padding:1px 3px;}
+.session-dur:hover{background:var(--bg3);color:var(--amber)}
+.session-dur-input{width:64px;background:var(--bg3);border:1px solid var(--amber);border-radius:3px;color:var(--amber);font-family:var(--mono);font-size:11px;padding:1px 5px;outline:none;text-align:center}
+.session-dur-ok{padding:1px 6px;font-size:10px;border:1px solid var(--green-dim);border-radius:2px;background:none;color:var(--green);cursor:pointer;font-family:var(--mono)}
+.session-dur-ok:hover{background:var(--green-bg)}
 
 /* heatmap */
 .heatmap-wrap{margin-bottom:20px}
@@ -329,6 +351,9 @@ function totalMs(dateStr){return S.categories.reduce((a,c)=>a+getCatMs(c.id,date
 
 // timer
 let timerInterval=null;
+let editingSessionId=null;
+let expandedSessions={};
+let historyFilter={mode:'7d',from:'',to:''}; // mode: '7d'|'30d'|'all'|'custom'
 function getElapsed(){
   if(S.timer.paused)return S.timer.accumulated;
   if(S.timer.running)return S.timer.accumulated+(Date.now()-S.timer.startTs);
@@ -475,37 +500,85 @@ function renderStats(){
   html+='</div>';
 
   // history by day
-  const days=[...new Set(S.sessions.map(s=>s.date))].sort((a,b)=>b.localeCompare(a));
-  if(days.length){
+  const allDays=[...new Set(S.sessions.map(s=>s.date))].sort((a,b)=>b.localeCompare(a));
+  if(allDays.length){
+    // filter logic
+    const today=todayStr();
+    function offsetDate(d,days){const dt=new Date(d+'T12:00:00');dt.setDate(dt.getDate()+days);return dt.toISOString().slice(0,10);}
+    let filteredDays=allDays;
+    const f=historyFilter;
+    if(f.mode==='7d')filteredDays=allDays.filter(d=>d>=offsetDate(today,-6));
+    else if(f.mode==='30d')filteredDays=allDays.filter(d=>d>=offsetDate(today,-29));
+    else if(f.mode==='custom'){
+      if(f.from)filteredDays=filteredDays.filter(d=>d>=f.from);
+      if(f.to)filteredDays=filteredDays.filter(d=>d<=f.to);
+    }
+
     html+='<div class="stats-block"><div class="stats-block-hd"><span>history</span></div>';
-    for(const day of days){
-      const dayTotal=totalMs(day);
-      const dayLabel=new Date(day+'T12:00:00').toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});
-      const daySessions=S.sessions.filter(s=>s.date===day);
-      html+='<div class="stats-day">';
-      html+='<div class="stats-day-hd"><span class="stats-day-date">'+dayLabel+'</span><span style="display:flex;align-items:center"><span class="stats-day-total">'+fmtMs(dayTotal)+'</span><button class="stats-day-del" onclick="deleteDay(\''+day+'\')">del day</button></span></div>';
-      // by category for that day
-      for(const cat of S.categories){
-        const cMs=getCatMs(cat.id,day);if(!cMs)continue;
-        html+='<div class="stat-cat-block"><div class="stat-cat-row"><span class="stat-cat-name" style="font-size:11px">'+esc(cat.name)+'</span><span class="stat-cat-time" style="font-size:11px">'+fmtMs(cMs)+'</span></div>';
-        for(const t of (cat.tasks||[])){const tMs=getTaskMs(t.id,day);if(!tMs)continue;
-          html+='<div class="stat-task-row"><span class="stat-task-lbl">'+esc(t.name)+'</span><span class="stat-task-val">'+fmtMs(tMs)+'</span></div>';
+
+    // filter bar
+    html+='<div class="history-filter">';
+    ['7d','30d','all'].forEach(m=>{
+      const label=m==='7d'?'last 7d':m==='30d'?'last 30d':'all time';
+      html+='<button class="filter-btn'+(f.mode===m?' active':'')+'" onclick="setHistoryFilter(\''+m+'\')">'+label+'</button>';
+    });
+    html+='<button class="filter-btn'+(f.mode==='custom'?' active':'')+'" onclick="setHistoryFilter(\'custom\')">custom</button>';
+    if(f.mode==='custom'){
+      html+='<div class="filter-date-inputs">';
+      html+='<input class="filter-date-input" type="date" value="'+esc(f.from)+'" onchange="setFilterFrom(this.value)" placeholder="from"/>';
+      html+='<span class="filter-sep">→</span>';
+      html+='<input class="filter-date-input" type="date" value="'+esc(f.to)+'" onchange="setFilterTo(this.value)" placeholder="to"/>';
+      html+='</div>';
+    }
+    html+='</div>';
+
+    if(!filteredDays.length){
+      html+='<div class="no-data">-- no records in this range --</div>';
+    } else {
+      for(const day of filteredDays){
+        const dayTotal=totalMs(day);
+        const dayLabel=new Date(day+'T12:00:00').toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});
+        const daySessions=S.sessions.filter(s=>s.date===day);
+        html+='<div class="stats-day">';
+        html+='<div class="stats-day-hd"><span class="stats-day-date">'+dayLabel+'</span><span style="display:flex;align-items:center"><span class="stats-day-total">'+fmtMs(dayTotal)+'</span><button class="stats-day-del" onclick="deleteDay(\''+day+'\')">del day</button></span></div>';
+        for(const cat of S.categories){
+          const cMs=getCatMs(cat.id,day);if(!cMs)continue;
+          html+='<div class="stat-cat-block"><div class="stat-cat-row"><span class="stat-cat-name" style="font-size:11px">'+esc(cat.name)+'</span><span class="stat-cat-time" style="font-size:11px">'+fmtMs(cMs)+'</span></div>';
+          for(const t of (cat.tasks||[])){const tMs=getTaskMs(t.id,day);if(!tMs)continue;
+            html+='<div class="stat-task-row"><span class="stat-task-lbl">'+esc(t.name)+'</span><span class="stat-task-val">'+fmtMs(tMs)+'</span></div>';
+          }
+          html+='</div>';
+        }
+        const isOpen=expandedSessions[day];
+        html+='<div class="sessions-toggle" onclick="toggleSessions(\''+day+'\')">';
+        html+='<span class="sessions-toggle-arrow'+(isOpen?' open':'')+'">▶</span>';
+        html+='<span>sessions ('+daySessions.length+')</span>';
+        html+='</div>';
+        if(isOpen){
+          html+='<div class="sessions-list">';
+          for(const sess of daySessions){
+            let cn='',tn='';
+            for(const c of S.categories){const t=(c.tasks||[]).find(t=>t.id===sess.taskId);if(t){cn=c.name;tn=t.name;break;}}
+            const isEditing=editingSessionId===sess.id;
+            html+='<div class="session-row" id="sess-'+sess.id+'">';
+            html+='<span class="session-cat">'+esc(cn)+'</span>';
+            html+='<span class="session-task">'+esc(tn)+'</span>';
+            if(isEditing){
+              const curMins=Math.round(sess.durationMs/60000);
+              html+='<input class="session-dur-input" id="sess-input-'+sess.id+'" value="'+curMins+'" type="number" min="1" max="9999" title="minutes"/>';
+              html+='<span style="font-size:10px;color:var(--text3);margin:0 2px">m</span>';
+              html+='<button class="session-dur-ok" onclick="confirmEditSession(\''+sess.id+'\')">ok</button>';
+              html+='<button class="session-del" onclick="cancelEditSession()">esc</button>';
+            } else {
+              html+='<span class="session-dur" title="click to edit" onclick="startEditSession(\''+sess.id+'\')">'+fmtMs(sess.durationMs)+'</span>';
+              html+='<button class="session-del" onclick="deleteSession(\''+sess.id+'\')">✕</button>';
+            }
+            html+='</div>';
+          }
+          html+='</div>';
         }
         html+='</div>';
       }
-      // individual sessions
-      html+='<div style="margin-top:6px">';
-      for(const sess of daySessions){
-        let cn='',tn='';
-        for(const c of S.categories){const t=(c.tasks||[]).find(t=>t.id===sess.taskId);if(t){cn=c.name;tn=t.name;break;}}
-        html+='<div class="session-row">';
-        html+='<span class="session-cat">'+esc(cn)+'</span>';
-        html+='<span class="session-task">'+esc(tn)+'</span>';
-        html+='<span class="session-dur">'+fmtMs(sess.durationMs)+'</span>';
-        html+='<button class="session-del" onclick="deleteSession(\''+sess.id+'\')">✕</button>';
-        html+='</div>';
-      }
-      html+='</div></div>';
     }
     html+='</div>';
   }
@@ -550,8 +623,31 @@ window.archiveTask=function(catId,taskId){
   }
   save();render();
 };
+window.toggleSessions=function(day){expandedSessions[day]=!expandedSessions[day];renderStats();};
+window.setHistoryFilter=function(mode){historyFilter.mode=mode;if(mode!=='custom'){historyFilter.from='';historyFilter.to='';}renderStats();};
+window.setFilterFrom=function(v){historyFilter.from=v;renderStats();};
+window.setFilterTo=function(v){historyFilter.to=v;renderStats();};
 window.deleteSession=function(id){
   S.sessions=S.sessions.filter(s=>s.id!==id);
+  save();renderStats();renderTodayStats();renderSidebarInner();
+};
+window.startEditSession=function(id){
+  editingSessionId=id;
+  renderStats();
+  const input=document.getElementById('sess-input-'+id);
+  if(input){input.focus();input.select();
+    input.onkeydown=e=>{if(e.key==='Enter')confirmEditSession(id);if(e.key==='Escape')cancelEditSession();};
+  }
+};
+window.cancelEditSession=function(){editingSessionId=null;renderStats();};
+window.confirmEditSession=function(id){
+  const input=document.getElementById('sess-input-'+id);
+  if(!input)return;
+  const mins=parseFloat(input.value);
+  if(isNaN(mins)||mins<=0){input.focus();return;}
+  const sess=S.sessions.find(s=>s.id===id);
+  if(sess)sess.durationMs=Math.round(mins*60000);
+  editingSessionId=null;
   save();renderStats();renderTodayStats();renderSidebarInner();
 };
 window.deleteDay=function(dateStr){
