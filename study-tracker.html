@@ -712,14 +712,145 @@ window.exportCSV=function(){
   const a=document.createElement('a');a.href=url;a.download='study-records.csv';a.click();
   URL.revokeObjectURL(url);
 };
-window.exportExcel=function(){
-  const rows=buildRows();
-  let html='<table><tr>'+rows[0].map(h=>'<th>'+h+'</th>').join('')+'</tr>';
-  for(let i=1;i<rows.length;i++)html+='<tr>'+rows[i].map(v=>'<td>'+v+'</td>').join('')+'</tr>';
-  html+='</table>';
-  const blob=new Blob([html],{type:'application/vnd.ms-excel;charset=utf-8'});
+window.exportExcel=async function(){
+  if(typeof ExcelJS==='undefined'){alert('ExcelJS not loaded yet, please try again in a moment.');return;}
+
+  const wb=new ExcelJS.Workbook();
+  wb.creator='study-tracker';
+
+  // helpers
+  function lerpChannel(a,b,t){return Math.round(a+(b-a)*t);}
+  function hexToRgb(h){return[parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16)];}
+  function lerpColor(stops,t){
+    const n=stops.length-1,idx=Math.min(Math.floor(t*n),n-1),lt=(t-idx/n)*n;
+    const[ar,ag,ab]=hexToRgb(stops[idx]),[br,bg2,bb]=hexToRgb(stops[idx+1]);
+    return[lerpChannel(ar,br,lt),lerpChannel(ag,bg2,lt),lerpChannel(ab,bb,lt)]
+      .map(x=>x.toString(16).padStart(2,'0')).join('').toUpperCase();
+  }
+  function argb(hex6){return 'FF'+hex6.toUpperCase();}
+  function cellFill(hex6){return{type:'pattern',pattern:'solid',fgColor:{argb:argb(hex6)}};}
+  function cellFont(hex6,bold=false){return{color:{argb:argb(hex6)},bold,name:'Consolas',size:10};}
+  function fmtDate(d){const dt=new Date(d+'T12:00:00');return(dt.getMonth()+1)+'/'+(dt.getDate());}
+
+  // ── Sheet 1: Data ──────────────────────────────────────────
+  const ws1=wb.addWorksheet('Data');
+  ws1.columns=[
+    {header:'Date',key:'date',width:14},
+    {header:'Category',key:'cat',width:16},
+    {header:'Task',key:'task',width:30},
+    {header:'Duration (min)',key:'dur',width:16},
+  ];
+  // header style
+  ws1.getRow(1).eachCell(cell=>{
+    cell.fill=cellFill('161B22');
+    cell.font=cellFont('3DD68C',true);
+    cell.alignment={horizontal:'center'};
+  });
+  // data rows
+  const dataRows=buildRows().slice(1);
+  dataRows.forEach(r=>{
+    const row=ws1.addRow(r);
+    row.eachCell(cell=>{
+      cell.font={name:'Consolas',size:10};
+    });
+  });
+
+  // ── Sheet 2: Heatmap ───────────────────────────────────────
+  const catMap={};
+  for(const s of S.sessions)
+    for(const c of S.categories)
+      if((c.tasks||[]).some(t=>t.id===s.taskId))catMap[s.taskId]=c.name;
+
+  const dateSet=new Set();
+  for(const s of S.sessions)dateSet.add(s.date);
+  const dates=[...dateSet].sort();
+  const catNames=[...new Set(S.categories.map(c=>c.name))];
+
+  const lookup={};
+  for(const s of S.sessions){
+    const cn=catMap[s.taskId];if(!cn)continue;
+    const key=cn+'|'+s.date;
+    lookup[key]=(lookup[key]||0)+s.durationMs;
+  }
+  const allMs=Object.values(lookup);
+  const maxMs=allMs.length?Math.max(...allMs):1;
+
+  const G_STOPS=['0D2E1A','1A5C31','27913F','2DB84F','39FF8A'];
+  const G_FGS   =['39FF8A','39FF8A','0D2E1A','0D2E1A','0D2E1A'];
+
+  const ws2=wb.addWorksheet('Heatmap');
+
+  // column widths
+  ws2.getColumn(1).width=14;
+  for(let i=0;i<dates.length;i++)ws2.getColumn(i+2).width=8;
+  ws2.getColumn(dates.length+2).width=8;
+
+  // header row
+  const hdrRow=ws2.addRow(['Category',...dates.map(fmtDate),'Sum']);
+  hdrRow.eachCell(cell=>{
+    cell.fill=cellFill('161B22');
+    cell.font=cellFont('3DD68C',true);
+    cell.alignment={horizontal:'center'};
+  });
+  hdrRow.getCell(1).alignment={horizontal:'left'};
+
+  // data rows
+  const colSums=new Array(dates.length).fill(0);
+  catNames.forEach(cat=>{
+    const rowData=[cat];
+    let rowSum=0;
+    for(let di=0;di<dates.length;di++){
+      const ms=lookup[cat+'|'+dates[di]]||0;
+      const mins=Math.round(ms/60000);
+      rowData.push(mins||null);
+      rowSum+=mins;
+      colSums[di]+=mins;
+    }
+    rowData.push(rowSum||null);
+    const row=ws2.addRow(rowData);
+
+    // cat label cell
+    row.getCell(1).fill=cellFill('161B22');
+    row.getCell(1).font=cellFont('F0B429',true);
+    row.getCell(1).alignment={horizontal:'left'};
+
+    // data cells
+    for(let di=0;di<dates.length;di++){
+      const ms=lookup[cat+'|'+dates[di]]||0;
+      const cell=row.getCell(di+2);
+      cell.alignment={horizontal:'center'};
+      if(ms>0){
+        const t=Math.min(ms/maxMs,1);
+        cell.fill=cellFill(lerpColor(G_STOPS,t));
+        cell.font=cellFont(lerpColor(G_FGS,t));
+      } else {
+        cell.fill=cellFill('1A2A1A');
+        cell.font=cellFont('2A4A2A');
+      }
+    }
+
+    // row sum cell
+    const sumCell=row.getCell(dates.length+2);
+    sumCell.fill=cellFill('161B22');
+    sumCell.font=cellFont('607080',true);
+    sumCell.alignment={horizontal:'center'};
+  });
+
+  // sum row
+  const sumRowData=['Sum',...colSums.map(v=>v||null),colSums.reduce((a,b)=>a+b,0)];
+  const sumRow=ws2.addRow(sumRowData);
+  sumRow.eachCell(cell=>{
+    cell.fill=cellFill('161B22');
+    cell.font=cellFont('3DD68C',true);
+    cell.alignment={horizontal:'center'};
+  });
+  sumRow.getCell(1).alignment={horizontal:'left'};
+
+  // download
+  const buf=await wb.xlsx.writeBuffer();
+  const blob=new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
   const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');a.href=url;a.download='study-records.xls';a.click();
+  const a=document.createElement('a');a.href=url;a.download='study-records.xlsx';a.click();
   URL.revokeObjectURL(url);
 };
 
@@ -730,5 +861,6 @@ setInterval(updateClock,1000);updateClock();
 load();
 })();
 </script>
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
 </body>
 </html>
