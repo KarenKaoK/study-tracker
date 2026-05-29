@@ -195,6 +195,12 @@ body{font-family:var(--mono);font-size:13px;color:var(--text);display:flex;justi
   display:flex;align-items:center;gap:5px;transition:all 0.1s;
 }
 .export-btn:hover{border-color:var(--green-dim);color:var(--green);background:var(--green-bg)}
+.auto-export-panel{width:100%;display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:6px 0 2px;color:var(--text3);font-size:10px}
+.auto-export-panel label{display:flex;align-items:center;gap:4px;cursor:pointer}
+.auto-export-panel input[type="checkbox"]{accent-color:var(--green)}
+.auto-export-panel input[type="number"]{width:56px;background:var(--bg3);border:1px solid var(--border2);border-radius:2px;color:var(--text2);font-family:var(--mono);font-size:10px;padding:2px 5px;outline:none}
+.auto-export-panel input[type="number"]:focus{border-color:var(--green-dim)}
+.auto-export-status{color:var(--text3)}
 .export-btn .sym{color:var(--green)}
 
 .stats-block{margin-bottom:22px}
@@ -324,13 +330,43 @@ body{font-family:var(--mono);font-size:13px;color:var(--text);display:flex;justi
 <script>
 (function(){
 const LS='study_tracker_v2';
+const AUTO_EXPORT_LS='study_tracker_auto_export_v1';
 let S={categories:[],sessions:[],selectedTaskId:null,timer:{running:false,paused:false,startTs:null,accumulated:0,taskId:null}};
+let autoExportSettings={enabled:false,intervalMinutes:60,lastExportAt:null};
+let autoExportCheckInterval=null;
+let isAutoEnding=false;
 
-function load(){
-  try{const d=localStorage.getItem(LS);if(d){const p=JSON.parse(d);if(p&&p.categories){S.categories=p.categories;S.sessions=p.sessions||[];}}}catch(e){}
-  render();
+function freshTimer(){return{running:false,paused:false,startTs:null,accumulated:0,taskId:null};}
+function normalizeTimer(timer){return Object.assign(freshTimer(),timer||{});}
+function loadAutoExportSettings(){
+  try{
+    const raw=localStorage.getItem(AUTO_EXPORT_LS);
+    if(raw){autoExportSettings=Object.assign(autoExportSettings,JSON.parse(raw)||{});}
+  }catch(e){}
+  const mins=parseInt(autoExportSettings.intervalMinutes,10);
+  autoExportSettings.intervalMinutes=Number.isFinite(mins)&&mins>0?mins:60;
+  autoExportSettings.enabled=!!autoExportSettings.enabled;
 }
-function save(){try{localStorage.setItem(LS,JSON.stringify({categories:S.categories,sessions:S.sessions}));}catch(e){}}
+function saveAutoExportSettings(){try{localStorage.setItem(AUTO_EXPORT_LS,JSON.stringify(autoExportSettings));}catch(e){}}
+function load(){
+  try{
+    const d=localStorage.getItem(LS);
+    if(d){
+      const p=JSON.parse(d);
+      if(p&&p.categories){
+        S.categories=p.categories;
+        S.sessions=p.sessions||[];
+        S.selectedTaskId=p.selectedTaskId||null;
+        S.timer=normalizeTimer(p.timer);
+        recoverUnfinishedTimer();
+      }
+    }
+  }catch(e){S.timer=freshTimer();}
+  loadAutoExportSettings();
+  render();
+  setupAutoExportChecks();
+}
+function save(){try{localStorage.setItem(LS,JSON.stringify({categories:S.categories,sessions:S.sessions,selectedTaskId:S.selectedTaskId,timer:S.timer}));}catch(e){}}
 function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,6);}
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 
@@ -345,6 +381,11 @@ function fmtTimer(ms){
   return [Math.floor(s/3600),Math.floor((s%3600)/60),s%60].map(n=>String(n).padStart(2,'0')).join(':');
 }
 function todayStr(){return new Date().toISOString().slice(0,10);}
+function dateStrFromTs(ts){return new Date(ts||Date.now()).toISOString().slice(0,10);}
+function fileStamp(){
+  const d=new Date(),pad=n=>String(n).padStart(2,'0');
+  return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+'-'+pad(d.getHours())+'-'+pad(d.getMinutes());
+}
 function getTaskMs(taskId,dateStr){return S.sessions.filter(s=>s.taskId===taskId&&(!dateStr||s.date===dateStr)).reduce((a,s)=>a+s.durationMs,0);}
 function getCatMs(catId,dateStr){const c=S.categories.find(c=>c.id===catId);return c?(c.tasks||[]).reduce((a,t)=>a+getTaskMs(t.id,dateStr),0):0;}
 function totalMs(dateStr){return S.categories.reduce((a,c)=>a+getCatMs(c.id,dateStr),0);}
@@ -363,25 +404,53 @@ function startTimer(){
   if(!S.selectedTaskId||S.timer.running)return;
   S.timer.taskId=S.selectedTaskId;S.timer.running=true;S.timer.paused=false;S.timer.startTs=Date.now();
   timerInterval=setInterval(updateTimerDisplay,500);
+  save();
   updateTimerDisplay();renderTimerBtns();renderSidebarInner();
 }
 function pauseTimer(){
   if(!S.timer.running)return;
   S.timer.accumulated+=Date.now()-S.timer.startTs;S.timer.running=false;S.timer.paused=true;
-  clearInterval(timerInterval);renderTimerBtns();updateTimerDisplay();
+  clearInterval(timerInterval);save();renderTimerBtns();updateTimerDisplay();
 }
 function resumeTimer(){
   if(!S.timer.paused)return;
   S.timer.running=true;S.timer.paused=false;S.timer.startTs=Date.now();
-  timerInterval=setInterval(updateTimerDisplay,500);renderTimerBtns();
+  timerInterval=setInterval(updateTimerDisplay,500);save();renderTimerBtns();
 }
-function endTimer(){
+function addSessionFromTimer(elapsed,reason,endedAt,startTs){
+  if(!S.timer.taskId||elapsed<=1000)return;
+  S.sessions.push({
+    id:uid(),
+    taskId:S.timer.taskId,
+    date:dateStrFromTs(startTs||Date.now()),
+    durationMs:elapsed,
+    endedBy:reason||'manual',
+    endedAt:endedAt||new Date().toISOString()
+  });
+}
+function endTimer(reason='manual'){
   if(!S.timer.running&&!S.timer.paused)return;
+  const startTs=S.timer.startTs||Date.now();
   const elapsed=getElapsed();
-  if(elapsed>1000){S.sessions.push({id:uid(),taskId:S.timer.taskId,date:todayStr(),durationMs:elapsed});save();}
-  S.timer={running:false,paused:false,startTs:null,accumulated:0,taskId:null};
+  addSessionFromTimer(elapsed,reason,new Date().toISOString(),startTs);
+  S.timer=freshTimer();
   clearInterval(timerInterval);
+  save();
   updateTimerDisplay();renderTimerBtns();renderTodayStats();renderSidebarInner();
+}
+function recoverUnfinishedTimer(){
+  if(!S.timer.running&&!S.timer.paused)return;
+  const now=Date.now();
+  const startTs=S.timer.startTs||now;
+  const elapsed=S.timer.paused?S.timer.accumulated:(S.timer.accumulated||0)+(now-startTs);
+  addSessionFromTimer(elapsed,'recovered_after_reload',new Date(now).toISOString(),startTs);
+  S.timer=freshTimer();
+  save();
+}
+function safeAutoEnd(reason){
+  if(isAutoEnding||(!S.timer.running&&!S.timer.paused))return;
+  isAutoEnding=true;
+  try{endTimer(reason);}finally{isAutoEnding=false;}
 }
 function updateTimerDisplay(){
   const el=document.getElementById('timer-display');if(!el)return;
@@ -482,6 +551,12 @@ function renderStats(){
   let html='<div class="export-row">';
   html+='<button class="export-btn" onclick="exportCSV()"><span class="sym">↓</span> export csv</button>';
   html+='<button class="export-btn" onclick="exportExcel()"><span class="sym">↓</span> export excel</button>';
+  html+='<button class="export-btn" onclick="exportJSON(false)"><span class="sym">↓</span> export json</button>';
+  html+='<div class="auto-export-panel">';
+  html+='<label><input type="checkbox" '+(autoExportSettings.enabled?'checked':'')+' onchange="toggleAutoExport(this.checked)"> auto json</label>';
+  html+='<span>every</span><input type="number" min="1" max="1440" value="'+esc(autoExportSettings.intervalMinutes)+'" onchange="setAutoExportInterval(this.value)"><span>min</span>';
+  html+='<span class="auto-export-status">last: '+esc(formatAutoExportTime(autoExportSettings.lastExportAt))+'</span>';
+  html+='</div>';
   html+='</div>';
 
   // cumulative
@@ -595,8 +670,9 @@ function render(){
 window.toggleCat=function(id){expandedCats[id]=expandedCats[id]===false?true:false;renderSidebarInner();};
 window.selectTask=function(id){
   S.selectedTaskId=id;
-  if((S.timer.running||S.timer.paused)&&S.timer.taskId!==id)endTimer();
+  if((S.timer.running||S.timer.paused)&&S.timer.taskId!==id)endTimer('task_switched');
   S.timer.accumulated=0;S.timer.startTs=null;
+  save();
   renderSidebarInner();renderTimerLabel();renderTimerBtns();updateTimerDisplay();
 };
 window.deleteCat=function(id){
@@ -619,7 +695,7 @@ window.archiveTask=function(catId,taskId){
   task.archived=true;
   if(S.selectedTaskId===taskId){
     S.selectedTaskId=null;
-    if(S.timer.running||S.timer.paused)endTimer();
+    if(S.timer.running||S.timer.paused)endTimer('task_archived');
   }
   save();render();
 };
@@ -692,7 +768,7 @@ document.getElementById('addCatBtn').addEventListener('click',function(){
 // timer buttons
 document.getElementById('btn-start').onclick=startTimer;
 document.getElementById('btn-pause').onclick=function(){S.timer.paused?resumeTimer():pauseTimer();};
-document.getElementById('btn-end').onclick=endTimer;
+document.getElementById('btn-end').onclick=function(){endTimer('manual');};
 
 // tabs
 document.querySelectorAll('.tab').forEach(tab=>{
@@ -818,6 +894,67 @@ function buildRows(){
   }
   return rows;
 }
+function buildExportPayload(){
+  const dates=S.sessions.map(s=>s.date).filter(Boolean).sort();
+  return{
+    version:2,
+    exportedAt:new Date().toISOString(),
+    categories:S.categories,
+    sessions:S.sessions,
+    summary:{
+      totalDurationMs:S.sessions.reduce((a,s)=>a+(s.durationMs||0),0),
+      totalSessions:S.sessions.length,
+      dateRange:{from:dates.length?dates[0]:null,to:dates.length?dates[dates.length-1]:null}
+    }
+  };
+}
+function downloadJSONPayload(payload){
+  const json=JSON.stringify(payload,null,2);
+  const blob=new Blob([json],{type:'application/json;charset=utf-8'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;a.download='study-tracker-'+fileStamp()+'.json';a.click();
+  URL.revokeObjectURL(url);
+}
+window.exportJSON=function(isAuto=false){
+  downloadJSONPayload(buildExportPayload());
+  if(isAuto){
+    autoExportSettings.lastExportAt=Date.now();
+    saveAutoExportSettings();
+    const st=document.getElementById('tab-stats');
+    if(st&&st.style.display!=='none')renderStats();
+  }
+};
+function shouldAutoExport(){
+  if(!autoExportSettings.enabled)return false;
+  const last=parseInt(autoExportSettings.lastExportAt||0,10);
+  const intervalMs=Math.max(1,parseInt(autoExportSettings.intervalMinutes,10)||60)*60000;
+  return !last||Date.now()-last>=intervalMs;
+}
+function checkAutoExport(){if(shouldAutoExport())window.exportJSON(true);}
+function setupAutoExportChecks(){
+  if(autoExportCheckInterval)clearInterval(autoExportCheckInterval);
+  autoExportCheckInterval=setInterval(checkAutoExport,60000);
+  setTimeout(checkAutoExport,0);
+}
+function formatAutoExportTime(ts){
+  if(!ts)return 'never';
+  try{return new Date(parseInt(ts,10)).toLocaleString('en-GB',{month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit'});}catch(e){return 'never';}
+}
+window.toggleAutoExport=function(enabled){
+  autoExportSettings.enabled=!!enabled;
+  if(enabled&&!autoExportSettings.lastExportAt)autoExportSettings.lastExportAt=Date.now();
+  saveAutoExportSettings();
+  setupAutoExportChecks();
+  renderStats();
+};
+window.setAutoExportInterval=function(v){
+  const mins=parseInt(v,10);
+  autoExportSettings.intervalMinutes=Number.isFinite(mins)&&mins>0?mins:60;
+  saveAutoExportSettings();
+  setupAutoExportChecks();
+  renderStats();
+};
 window.exportCSV=function(){
   const rows=buildRows();
   const csv=rows.map(r=>r.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(',')).join('\n');
@@ -967,6 +1104,15 @@ window.exportExcel=async function(){
   const a=document.createElement('a');a.href=url;a.download='study-records.xlsx';a.click();
   URL.revokeObjectURL(url);
 };
+
+// auto-end when the page is hidden or closed
+if(typeof document!=='undefined'){
+  document.addEventListener('visibilitychange',function(){
+    if(document.visibilityState==='hidden')safeAutoEnd('page_hidden');
+  });
+}
+window.addEventListener('pagehide',function(){safeAutoEnd('pagehide');});
+window.addEventListener('beforeunload',function(){safeAutoEnd('beforeunload');});
 
 // clock
 function updateClock(){const el=document.getElementById('clock');if(el)el.textContent=new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit'});}
